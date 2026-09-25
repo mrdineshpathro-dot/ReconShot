@@ -1,17 +1,19 @@
 """
-Concurrent scan orchestrator, live Rich progress UI, and runner for ReconShot.
+Concurrent scan orchestrator, live Rich progress UI, visual clustering,
+and export runner for ReconShot.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import os
 import signal
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 import uuid
 
 from rich.console import Console, Group
@@ -31,6 +33,12 @@ from rich.table import Table
 from rich.text import Text
 
 from reconshot.browser import BrowserManager
+from reconshot.exporter import (
+    export_to_csv,
+    export_to_markdown,
+    export_to_sqlite,
+    send_webhook_notification,
+)
 from reconshot.logger import log_failure, log_success, logger, setup_logging
 from reconshot.metadata import (
     load_resume_state,
@@ -41,6 +49,7 @@ from reconshot.metadata import (
 from reconshot.models import ScanOptions, ScanSummary, TargetResult
 from reconshot.naming import url_to_filename
 from reconshot.reporter import generate_html_report
+from reconshot.scope_filter import sort_targets_by_priority
 from reconshot.screenshot import capture_target_with_retry
 from reconshot.utils import (
     console,
@@ -48,10 +57,11 @@ from reconshot.utils import (
     format_duration,
     get_status_style,
 )
+from reconshot.visual_engine import cluster_target_results
 
 
 class ReconShotEngine:
-    """Core scanning and screenshot orchestration engine."""
+    """Core scanning, intelligence extraction, and screenshot orchestration engine."""
 
     def __init__(self, options: ScanOptions) -> None:
         self.options = options
@@ -65,7 +75,7 @@ class ReconShotEngine:
         self.interrupted: bool = False
         self.browser_manager: Optional[BrowserManager] = None
 
-        # Directory handles
+        # Output Directories
         self.screenshots_dir, self.metadata_dir, self.reports_dir, self.logs_dir = (
             ensure_output_dirs(self.options.output_dir)
         )
@@ -74,49 +84,46 @@ class ReconShotEngine:
         self.success_file = self.logs_dir / "success.txt"
         self.failed_file = self.logs_dir / "failed.txt"
 
-        # Setup logging
+        # Setup Logging
         setup_logging(self.log_file, self.options.verbose, self.options.quiet)
 
-    def _render_stats_panel(
-        self,
-        total: int,
-        completed: int,
-        successful: int,
-        failed: int,
-        workers: int,
-    ) -> Panel:
-        """Create a compact live statistics panel."""
-        remaining = max(0, total - completed)
-        grid = Table.grid(expand=True, padding=(0, 2))
-        grid.add_column(style="bold cyan", width=14)
-        grid.add_column(style="bright_white")
-        grid.add_column(style="bold cyan", width=14)
-        grid.add_column(style="bright_white")
-
-        grid.add_row("Targets    :", f"[bold white]{total}[/bold white]", "Successful :", f"[bold green]{successful}[/bold green]")
-        grid.add_row("Completed  :", f"[bold white]{completed}[/bold white]", "Failed     :", f"[bold red]{failed}[/bold red]")
-        grid.add_row("Remaining  :", f"[bold yellow]{remaining}[/bold yellow]", "Workers    :", f"[bold magenta]{workers}[/bold magenta]")
-
-        return Panel(
-            grid,
-            title="[bold cyan]⚡ ReconShot Monitor ⚡[/bold cyan]",
-            border_style="cyan",
-            padding=(0, 1),
-        )
-
     def _print_target_log(self, result: TargetResult) -> None:
-        """Print clean, formatted terminal log line for a target."""
+        """Print rich formatted terminal log line for each captured target."""
         if self.options.quiet:
             return
 
         if result.success and result.screenshot:
             status_style, status_text = get_status_style(result.status_code)
-            console.print(f"[bold green][✓][/bold green] [{status_style}]{status_text:>3}[/{status_style}]  [bright_white]{result.url}[/bright_white]")
+            
+            # Security Grade Tag
+            sec_tag = ""
+            if result.security:
+                g = result.security.grade
+                g_style = "bold green" if g in ("A+", "A") else ("bold yellow" if g in ("B", "C") else "bold red")
+                sec_tag = f" [{g_style}][{g}][/{g_style}]"
+
+            console.print(f"[bold green][✓][/bold green] [{status_style}]{status_text:>3}[/{status_style}]{sec_tag}  [bright_white]{result.url}[/bright_white]")
+            
+            # Title & Technologies Line
+            details_items = []
             if result.page_title:
-                title_clean = result.page_title.strip()
-                if len(title_clean) > 80:
-                    title_clean = title_clean[:77] + "..."
-                console.print(f"     [cyan]└──[/cyan] [dim italic]{title_clean}[/dim italic]")
+                t_clean = result.page_title.strip()
+                if len(t_clean) > 55:
+                    t_clean = t_clean[:52] + "..."
+                details_items.append(f"[dim italic]{t_clean}[/dim italic]")
+
+            if result.technologies:
+                tech_names = ", ".join(t.name for t in result.technologies[:4])
+                details_items.append(f"[cyan]Tech: {tech_names}[/cyan]")
+
+            if details_items:
+                joined = "  •  ".join(details_items)
+                console.print(f"     [cyan]└──[/cyan] {joined}")
+
+            # Forms / Endpoints alert
+            if result.dom and result.dom.has_login_form:
+                console.print(f"         [yellow]🔑 Login Form Detected[/yellow]")
+
         elif result.success and not result.screenshot and result.error == "Filtered by status code":
             status_style, status_text = get_status_style(result.status_code)
             console.print(f"[bold yellow][○][/bold yellow] [{status_style}]{status_text:>3}[/{status_style}]  [dim]{result.url} (Status filtered)[/dim]")
@@ -154,7 +161,7 @@ class ReconShotEngine:
                     screenshot_path=screenshot_path,
                 )
             except Exception as e:
-                logger.debug(f"Unhandled error in worker for {url}: {e}")
+                logger.debug(f"Unhandled worker exception for {url}: {e}")
                 result = TargetResult(
                     url=url,
                     final_url=url,
@@ -168,7 +175,7 @@ class ReconShotEngine:
                     except Exception:
                         pass
 
-            # Update records
+            # Update engine state
             self.results.append(result)
             self.completed_urls.add(url)
 
@@ -179,10 +186,10 @@ class ReconShotEngine:
                 self.failed_count += 1
                 log_failure(self.failed_file, result.url, result.error or "Failed")
 
-            # Save individual JSON metadata
+            # Persist individual target metadata
             save_target_metadata(result, self.metadata_dir)
 
-            # Persist resume state atomically
+            # Persist atomic resume state
             save_resume_state(
                 self.state_file,
                 self.scan_id,
@@ -190,12 +197,12 @@ class ReconShotEngine:
                 self.results,
             )
 
-            # Update UI
+            # Update CLI output & progress bar
             self._print_target_log(result)
             progress.advance(task_id, 1)
 
     async def run(self) -> ScanSummary:
-        """Run the full scanning workflow."""
+        """Execute full scanning, clustering, intelligence aggregation, and exports."""
         self.start_time = time.monotonic()
         self.start_iso = datetime.now(timezone.utc).astimezone().isoformat()
 
@@ -224,10 +231,11 @@ class ReconShotEngine:
         else:
             targets_to_scan = all_urls
 
+        # Sort targets putting high priority assets (admin, vpn, dev) first
+        targets_to_scan = sort_targets_by_priority(targets_to_scan)
         total_targets = len(targets_to_scan)
 
         if not self.options.quiet:
-            # Print scan configuration panel
             config_grid = Table.grid(expand=True, padding=(0, 2))
             config_grid.add_column(style="bold cyan", width=14)
             config_grid.add_column(style="bright_white")
@@ -265,7 +273,7 @@ class ReconShotEngine:
                 results=self.results,
             )
 
-        # Initialize browser manager
+        # Initialize Browser
         self.browser_manager = BrowserManager(self.options)
         await self.browser_manager.initialize()
 
@@ -313,7 +321,26 @@ class ReconShotEngine:
         duration = time.monotonic() - self.start_time
         end_iso = datetime.now(timezone.utc).astimezone().isoformat()
 
-        # Build scan summary
+        # 1. Visual Clustering Computation
+        clusters_count = 0
+        if self.options.visual_clustering:
+            clusters_count = cluster_target_results(self.results)
+
+        # 2. Tech Stack & Security Statistics Aggregation
+        tech_counter: Counter = Counter()
+        grade_counter: Counter = Counter()
+
+        for r in self.results:
+            if r.technologies:
+                for t in r.technologies:
+                    tech_counter[t.name] += 1
+            if r.security:
+                grade_counter[r.security.grade] += 1
+
+        top_techs = [{"name": name, "count": count} for name, count in tech_counter.most_common(10)]
+        security_grades = dict(grade_counter)
+
+        # Build Scan Summary
         summary = ScanSummary(
             scan_id=self.scan_id,
             start_time=self.start_iso,
@@ -324,6 +351,9 @@ class ReconShotEngine:
             failed=self.failed_count,
             skipped=total_initial - len(self.results),
             results=self.results,
+            clusters_count=clusters_count,
+            top_technologies=top_techs,
+            security_grades=security_grades,
             options={
                 "workers": self.options.workers,
                 "timeout": self.options.timeout,
@@ -333,15 +363,27 @@ class ReconShotEngine:
             },
         )
 
-        # Save summary JSON
+        # Save Summary JSON
         save_scan_summary(summary, self.metadata_dir)
 
-        # Generate HTML report if enabled
+        # 3. Multi-Format Exports
+        if self.options.export_csv:
+            export_to_csv(self.results, self.options.output_dir / "results.csv")
+        if self.options.export_markdown:
+            export_to_markdown(summary, self.options.output_dir / "summary.md")
+        if self.options.export_sqlite:
+            export_to_sqlite(self.results, self.options.output_dir / "reconshot.db")
+
+        # 4. Generate HTML Report
         report_file_path = self.reports_dir / "report.html"
         if self.options.generate_report:
             generate_html_report(summary, report_file_path)
 
-        # Print final summary UI
+        # 5. Webhook Notification
+        if self.options.webhook_url:
+            send_webhook_notification(self.options.webhook_url, summary)
+
+        # 6. Print Final Summary UI
         self._print_scan_summary(summary, report_file_path)
 
         return summary
@@ -354,52 +396,58 @@ class ReconShotEngine:
         console.print()
         # Summary Box
         summary_grid = Table.grid(expand=True, padding=(0, 2))
-        summary_grid.add_column(style="bold cyan", width=14)
+        summary_grid.add_column(style="bold cyan", width=16)
+        summary_grid.add_column(style="bright_white")
+        summary_grid.add_column(style="bold cyan", width=16)
         summary_grid.add_column(style="bright_white")
 
-        summary_grid.add_row("Targets    :", f"[bold white]{summary.total_targets}[/bold white]")
-        summary_grid.add_row("Successful :", f"[bold green]{summary.successful}[/bold green]")
-        summary_grid.add_row("Failed     :", f"[bold red]{summary.failed}[/bold red]")
-        summary_grid.add_row("Duration   :", f"[bold white]{format_duration(summary.duration_seconds)}[/bold white]")
-        summary_grid.add_row("Screenshots:", f"[cyan]{self.screenshots_dir}[/cyan]")
+        summary_grid.add_row("Targets    :", f"[bold white]{summary.total_targets}[/bold white]", "Successful :", f"[bold green]{summary.successful}[/bold green]")
+        summary_grid.add_row("Duration   :", f"[bold white]{format_duration(summary.duration_seconds)}[/bold white]", "Failed     :", f"[bold red]{summary.failed}[/bold red]")
+        summary_grid.add_row("Visual Clusters:", f"[bold magenta]{summary.clusters_count}[/bold magenta]", "Screenshots:", f"[cyan]{self.screenshots_dir}[/cyan]")
         if self.options.generate_report:
-            summary_grid.add_row("Report     :", f"[bold green]{report_path}[/bold green]")
-        summary_grid.add_row("Logs       :", f"[dim]{self.log_file}[/dim]")
+            summary_grid.add_row("HTML Report:", f"[bold green]{report_path}[/bold green]", "CSV Export :", f"[bold cyan]{self.options.output_dir / 'results.csv'}[/bold cyan]")
 
         console.print(
             Panel(
                 summary_grid,
-                title="[bold green]🏁 Scan Complete 🏁[/bold green]",
+                title="[bold green]🏁 ReconShot Intelligence Summary 🏁[/bold green]",
                 border_style="green",
                 padding=(0, 1),
             )
         )
 
-        # Target Results Summary Table (sample or top results)
+        # Target Results Summary Table
         if summary.results and not self.options.quiet:
             table = Table(
-                title="[bold cyan]Captured Targets Summary[/bold cyan]",
+                title="[bold cyan]Discovered Applications & Intelligence[/bold cyan]",
                 show_header=True,
                 header_style="bold cyan",
                 border_style="dim cyan",
                 padding=(0, 1),
                 expand=True,
             )
-            table.add_column("Status", justify="center", width=8)
+            table.add_column("Status", justify="center", width=7)
+            table.add_column("Sec", justify="center", width=5)
             table.add_column("Target URL", style="bright_white", ratio=3)
-            table.add_column("Page Title", style="italic cyan", ratio=3)
-            table.add_column("Time", justify="right", width=10)
-            table.add_column("Screenshot", style="dim", ratio=2)
+            table.add_column("Page Title / Errors", style="italic cyan", ratio=3)
+            table.add_column("Technologies", style="magenta", ratio=2)
+            table.add_column("Time", justify="right", width=8)
 
             for r in summary.results:
                 style_name, status_str = get_status_style(r.status_code)
                 status_text = Text(status_str, style=style_name)
+
+                sec_grade = r.security.grade if r.security else "-"
+                sec_style = "bold green" if sec_grade in ("A+", "A") else ("bold yellow" if sec_grade in ("B", "C") else "bold red")
+                sec_text = Text(sec_grade, style=sec_style)
+
                 url_text = Text(r.url, overflow="ellipsis")
                 title_text = Text(r.page_title or (r.error or "--"), overflow="ellipsis")
+                techs_str = ", ".join(t.name for t in r.technologies[:3]) if r.technologies else "--"
+                tech_text = Text(techs_str, overflow="ellipsis")
                 time_text = Text(f"{r.response_time_ms:.0f}ms" if r.response_time_ms is not None else "--", style="dim")
-                shot_text = Text(r.screenshot or "--", overflow="ellipsis")
 
-                table.add_row(status_text, url_text, title_text, time_text, shot_text)
+                table.add_row(status_text, sec_text, url_text, title_text, tech_text, time_text)
 
             console.print(table)
 

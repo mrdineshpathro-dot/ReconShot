@@ -13,11 +13,13 @@ from playwright.async_api import (
     Browser,
     BrowserContext,
     Playwright,
+    Route,
     async_playwright,
 )
 
 from reconshot.logger import logger
 from reconshot.models import ScanOptions, ViewportConfig
+from reconshot.stealth import encode_basic_auth, get_random_user_agent, is_resource_blocked
 
 DEFAULT_DESKTOP_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -96,8 +98,13 @@ class BrowserManager:
             raise BrowserError("Browser is not initialized.")
 
         vp = self.options.viewport
-        user_agent = self.options.user_agent
-        if not user_agent:
+        
+        # Determine User-Agent
+        if self.options.random_user_agent:
+            user_agent = get_random_user_agent()
+        elif self.options.user_agent:
+            user_agent = self.options.user_agent
+        else:
             user_agent = DEFAULT_MOBILE_UA if vp.is_mobile else DEFAULT_DESKTOP_UA
 
         context_kwargs: Dict[str, Any] = {
@@ -112,8 +119,14 @@ class BrowserManager:
         }
 
         # Add custom headers if configured
-        if self.options.headers:
-            context_kwargs["extra_http_headers"] = self.options.headers
+        headers_to_set = dict(self.options.headers or {})
+        if self.options.basic_auth:
+            auth_val = encode_basic_auth(self.options.basic_auth)
+            if auth_val:
+                headers_to_set["Authorization"] = auth_val
+
+        if headers_to_set:
+            context_kwargs["extra_http_headers"] = headers_to_set
 
         context = await self._browser.new_context(**context_kwargs)
 
@@ -127,6 +140,17 @@ class BrowserManager:
         # Set default timeout
         context.set_default_navigation_timeout(self.options.timeout * 1000)
         context.set_default_timeout(self.options.timeout * 1000)
+
+        # Intercept and block unnecessary media if block_media is enabled
+        if self.options.block_media:
+            async def route_interceptor(route: Route) -> None:
+                req = route.request
+                if is_resource_blocked(req.url, req.resource_type):
+                    await route.abort()
+                else:
+                    await route.continue_()
+
+            await context.route("**/*", route_interceptor)
 
         return context
 

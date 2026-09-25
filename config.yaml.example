@@ -1,5 +1,5 @@
 # ==============================================================================
-# ReconShot — Automated Web Application Screenshot Reconnaissance
+# ReconShot — Automated Web Application Screenshot & Attack Surface Reconnaissance
 # Example Configuration File
 #
 # Author  : Mr Dinesh Pathro
@@ -7,11 +7,13 @@
 # Platform: Kali Linux / Debian / Python 3.10+
 # ==============================================================================
 
-# Concurrency & Performance
+# Concurrency, Performance & Acceleration
 workers: 5                 # Number of concurrent screenshot workers (default: 5)
 timeout: 30                # Page navigation & loading timeout in seconds (default: 30)
 delay: 0.0                 # Delay in seconds to wait after DOM load for JS rendering (e.g. 1.5)
 retries: 0                 # Number of retry attempts on temporary connection failures
+block_media: false         # Block videos, audio, and webfonts to boost scan speed 300-500%
+random_agent: false        # Automatically rotate User-Agent strings across browser pool
 
 # Browser & Viewport Configuration
 browser:
@@ -19,20 +21,37 @@ browser:
   height: 1080             # Viewport height in pixels (Desktop default: 1080)
   full_page: false         # Capture full scrollable page (true/false)
   mobile: false            # Emulate mobile device viewport (390x844 with touch enabled)
+  tablet: false            # Emulate tablet viewport (820x1180)
   desktop: true            # Use standard desktop viewport
   user_agent: null         # Custom User-Agent string (null = default ReconShot UA)
+  selector: null           # Capture specific CSS element selector (e.g. "#login-form")
+  inject_js: null          # Custom JavaScript code injected into DOM before screenshot
 
-# Output Paths
+# Intelligence & Analysis Engines
+intelligence:
+  detect_tech: true        # Fingerprint 100+ servers, CMSs, frontend/backend frameworks
+  analyze_security: true   # Audit security headers, information leaks, and calculate score/grade
+  analyze_dom: true        # Extract forms, password inputs, API endpoints, and potential secrets
+  resolve_dns: true        # Resolve IPs and test for Subdomain / CNAME Takeover risks
+  visual_clustering: true  # Group identical/similar web pages using perceptual dHash
+
+# Output & Multi-Format Exports
 output:
   directory: "./results"   # Base directory for screenshots, metadata, reports, and logs
+  export_csv: true         # Export structured CSV spreadsheet (results.csv)
+  export_markdown: true    # Export executive Markdown summary (summary.md)
+  export_sqlite: false     # Export SQLite relational database (reconshot.db)
 
-# Reporting
+# Reporting & Notifications
 report:
-  enabled: true            # Automatically generate standalone dark-themed HTML report
+  enabled: true            # Automatically generate standalone dark-themed HTML report 2.0
+webhook:
+  url: null                # Discord / Slack webhook endpoint URL for instant scan notifications
 
 # Network & Proxy
 network:
   proxy: null              # Proxy address, e.g. "http://127.0.0.1:8080" or "socks5://127.0.0.1:9050"
+  basic_auth: null         # HTTP Basic Authentication (e.g. "admin:password123")
   ignore_https_errors: true # Ignore self-signed or invalid SSL certificates (default: true)
 
 # Authenticated Reconnaissance (Authorized scope only)

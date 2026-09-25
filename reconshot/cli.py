@@ -27,30 +27,21 @@ from reconshot.input_handler import (
     parse_status_filter,
 )
 from reconshot.models import ScanOptions, ViewportConfig
+from reconshot.scope_filter import expand_common_web_ports
 from reconshot.utils import console, err_console, print_banner, startup_animation
 
 
-class ReconShotHelpFormatter(argparse.RawDescriptionHelpFormatter):
-    """Custom help formatter with clean section formatting."""
-    pass
-
-
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the command line argument parser for ReconShot."""
-    description = f"""
-[bold cyan]{__title__}[/bold cyan] [bright_white]v{__version__}[/bright_white] — [italic]{__tagline__}[/italic]
-Author : [bright_cyan]{__author__}[/bright_cyan]
-Support: [bright_yellow]{__support__}[/bright_yellow]
-"""
+    """Construct the advanced command line argument parser for ReconShot."""
     parser = argparse.ArgumentParser(
         prog="reconshot",
-        description="ReconShot — Automated Web Application Screenshot Reconnaissance",
+        description="ReconShot — Automated Web Application Screenshot & Attack Surface Reconnaissance",
         formatter_class=argparse.RawTextHelpFormatter,
         add_help=False,
     )
 
     # Target Input Group
-    target_group = parser.add_argument_group("🎯 Target Input")
+    target_group = parser.add_argument_group("🎯 Target Input & Discovery")
     target_group.add_argument(
         "-u", "--url",
         type=str,
@@ -63,9 +54,16 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
         metavar="FILE",
         help="Read target URLs from a text file (one URL per line)",
     )
+    target_group.add_argument(
+        "--expand-ports",
+        type=str,
+        default=None,
+        metavar="PORTS",
+        help="Expand hostnames across common ports (e.g. --expand-ports 80,443,8080,8443,8888)",
+    )
 
     # Performance & Concurrency Group
-    perf_group = parser.add_argument_group("⚡ Performance & Timing")
+    perf_group = parser.add_argument_group("⚡ Performance, Stealth & Acceleration")
     perf_group.add_argument(
         "-w", "--workers",
         type=int,
@@ -94,9 +92,21 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
         metavar="INT",
         help="Number of retry attempts for temporary failures (default: 0)",
     )
+    perf_group.add_argument(
+        "--block-media",
+        action="store_true",
+        default=False,
+        help="Block video, audio, and font downloads to accelerate scans by 300-500%%",
+    )
+    perf_group.add_argument(
+        "--random-agent",
+        action="store_true",
+        default=False,
+        help="Rotate User-Agent strings across a pool of modern desktop/mobile browsers",
+    )
 
     # Viewport & Browser Mode Group
-    browser_group = parser.add_argument_group("🖥️ Viewport & Browser Options")
+    browser_group = parser.add_argument_group("🖥️ Viewport & Capture Customization")
     browser_group.add_argument(
         "--width",
         type=int,
@@ -136,11 +146,64 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
         help="Use laptop viewport (1366×768)",
     )
     browser_group.add_argument(
+        "--tablet",
+        action="store_true",
+        default=False,
+        help="Use tablet viewport (820×1180)",
+    )
+    browser_group.add_argument(
+        "--selector",
+        type=str,
+        default=None,
+        metavar="CSS",
+        help="Capture only a specific CSS element selector (e.g. --selector '#login-box')",
+    )
+    browser_group.add_argument(
+        "--inject-js",
+        type=str,
+        default=None,
+        metavar="CODE",
+        help="Inject custom JavaScript into page DOM before capturing screenshot",
+    )
+    browser_group.add_argument(
         "--user-agent",
         type=str,
         default=None,
         metavar="TEXT",
         help="Custom User-Agent header string",
+    )
+
+    # Intelligence & Analysis Engines Group
+    intel_group = parser.add_argument_group("🔍 Intelligence, Fingerprinting & Security")
+    intel_group.add_argument(
+        "--no-tech",
+        dest="detect_tech",
+        action="store_false",
+        help="Disable technology stack detection engine",
+    )
+    intel_group.add_argument(
+        "--no-security",
+        dest="analyze_security",
+        action="store_false",
+        help="Disable security header grading and leak analysis",
+    )
+    intel_group.add_argument(
+        "--no-dom",
+        dest="analyze_dom",
+        action="store_false",
+        help="Disable DOM form, secret, and endpoint extraction",
+    )
+    intel_group.add_argument(
+        "--no-dns",
+        dest="resolve_dns",
+        action="store_false",
+        help="Disable DNS IP resolution and subdomain takeover checks",
+    )
+    intel_group.add_argument(
+        "--no-clustering",
+        dest="visual_clustering",
+        action="store_false",
+        help="Disable perceptual visual difference clustering",
     )
 
     # Network & Authentication Group
@@ -151,6 +214,13 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
         default=None,
         metavar="URL",
         help="HTTP/HTTPS/SOCKS proxy URL (e.g. http://127.0.0.1:8080)",
+    )
+    net_group.add_argument(
+        "--basic-auth",
+        type=str,
+        default=None,
+        metavar="USER:PASS",
+        help="HTTP Basic Authentication credentials (user:password)",
     )
     net_group.add_argument(
         "--cookies",
@@ -168,7 +238,7 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
     )
 
     # Filter & Resume Group
-    filter_group = parser.add_argument_group("🔍 Filtering & Scan Control")
+    filter_group = parser.add_argument_group("🎯 Filtering & Scan Control")
     filter_group.add_argument(
         "--status",
         type=str,
@@ -183,8 +253,8 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
         help="Resume an interrupted scan from previous state",
     )
 
-    # Output & Reporting Group
-    out_group = parser.add_argument_group("📁 Output & Reporting")
+    # Output, Reporting & Webhooks Group
+    out_group = parser.add_argument_group("📁 Output, Multi-Format Exports & Webhooks")
     out_group.add_argument(
         "-o", "--output",
         type=str,
@@ -204,6 +274,19 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
         dest="report",
         action="store_false",
         help="Disable HTML report generation",
+    )
+    out_group.add_argument(
+        "--sqlite",
+        action="store_true",
+        default=False,
+        help="Export structured results into SQLite database (reconshot.db)",
+    )
+    out_group.add_argument(
+        "--webhook",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Discord / Slack webhook endpoint URL to send completion alerts",
     )
 
     # General Options Group
@@ -243,14 +326,9 @@ Support: [bright_yellow]{__support__}[/bright_yellow]
 
 
 def parse_arguments_to_options(args: argparse.Namespace) -> ScanOptions:
-    """
-    Merge configuration file with CLI flags to produce final ScanOptions.
-    CLI flags take strict precedence over configuration file values.
-    """
-    # 1. Start with defaults
+    """Merge configuration file with CLI flags to produce final ScanOptions."""
     config_dict = dict(DEFAULT_CONFIG)
 
-    # 2. If config file is provided or config.yaml exists locally, merge it
     config_path = None
     if args.config:
         config_path = Path(args.config)
@@ -260,17 +338,17 @@ def parse_arguments_to_options(args: argparse.Namespace) -> ScanOptions:
     if config_path and config_path.exists():
         loaded = load_config_file(config_path)
         if loaded:
-            # Shallow/deep merge
             for k, v in loaded.items():
                 if isinstance(v, dict) and k in config_dict and isinstance(config_dict[k], dict):
                     config_dict[k].update(v)
                 else:
                     config_dict[k] = v
 
-    # 3. Determine Viewport
     b_conf = config_dict.get("browser", {})
     if args.mobile or b_conf.get("mobile"):
         viewport = ViewportConfig.mobile()
+    elif args.tablet:
+        viewport = ViewportConfig.tablet()
     elif args.laptop:
         viewport = ViewportConfig.laptop()
     elif args.width or args.height or b_conf.get("width") or b_conf.get("height"):
@@ -283,7 +361,6 @@ def parse_arguments_to_options(args: argparse.Namespace) -> ScanOptions:
     full_page = args.full_page if args.full_page is not None else b_conf.get("full_page", False)
     user_agent = args.user_agent if args.user_agent is not None else b_conf.get("user_agent")
 
-    # 4. Resolve Target URLs
     urls: List[str] = []
     if args.url:
         normalized = normalize_url(args.url)
@@ -299,25 +376,27 @@ def parse_arguments_to_options(args: argparse.Namespace) -> ScanOptions:
             sys.exit(1)
         urls = load_urls_from_file(list_path)
     else:
-        # Check stdin
         stdin_urls = load_urls_from_stdin()
         if stdin_urls:
             urls = stdin_urls
 
-    # 5. Resolve Output Directory
+    if args.expand_ports and urls:
+        try:
+            port_ints = [int(p.strip()) for p in args.expand_ports.split(",") if p.strip()]
+            urls = expand_common_web_ports(urls, port_ints)
+        except Exception as e:
+            err_console.print(f"[bold yellow][!] Warning:[/bold yellow] Invalid --expand-ports argument: {e}")
+
     out_dir_str = args.output or config_dict.get("output", {}).get("directory", "./results")
     output_dir = Path(out_dir_str).expanduser()
 
-    # 6. Resolve Workers, Timeout, Delay, Retries
     workers = args.workers if args.workers is not None else int(config_dict.get("workers", 5))
     timeout = args.timeout if args.timeout is not None else int(config_dict.get("timeout", 30))
     delay = args.delay if args.delay is not None else float(config_dict.get("delay", 0.0))
     retries = args.retries if args.retries is not None else int(config_dict.get("retries", 0))
 
-    # 7. Resolve Proxy
     proxy = args.proxy if args.proxy is not None else config_dict.get("network", {}).get("proxy")
 
-    # 8. Resolve Cookies
     cookies = None
     cookies_path_str = args.cookies or config_dict.get("auth", {}).get("cookies_file")
     if cookies_path_str:
@@ -328,7 +407,6 @@ def parse_arguments_to_options(args: argparse.Namespace) -> ScanOptions:
             err_console.print(f"[bold red][!] Error loading cookies file {cookies_p}:[/bold red] {e}")
             sys.exit(1)
 
-    # 9. Resolve Headers
     headers = None
     headers_path_str = args.headers or config_dict.get("auth", {}).get("headers_file")
     if headers_path_str:
@@ -339,11 +417,9 @@ def parse_arguments_to_options(args: argparse.Namespace) -> ScanOptions:
             err_console.print(f"[bold red][!] Error loading headers file {headers_p}:[/bold red] {e}")
             sys.exit(1)
 
-    # 10. Resolve Status Filter
     status_raw = args.status or config_dict.get("filter", {}).get("status")
     status_filter = parse_status_filter(status_raw)
 
-    # 11. Resolve Report
     if args.report is not None:
         generate_report = args.report
     else:
@@ -369,6 +445,20 @@ def parse_arguments_to_options(args: argparse.Namespace) -> ScanOptions:
         quiet=args.quiet,
         user_agent=user_agent,
         config_file=config_path,
+        detect_tech=getattr(args, "detect_tech", True),
+        analyze_security=getattr(args, "analyze_security", True),
+        analyze_dom=getattr(args, "analyze_dom", True),
+        resolve_dns=getattr(args, "resolve_dns", True),
+        visual_clustering=getattr(args, "visual_clustering", True),
+        block_media=args.block_media,
+        random_user_agent=args.random_agent,
+        selector=args.selector,
+        inject_js=args.inject_js,
+        basic_auth=args.basic_auth,
+        export_csv=True,
+        export_markdown=True,
+        export_sqlite=args.sqlite,
+        webhook_url=args.webhook,
     )
 
 
@@ -379,11 +469,9 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
 
     options = parse_arguments_to_options(args)
 
-    # Print banner & startup
     print_banner(quiet=options.quiet)
     startup_animation(quiet=options.quiet)
 
-    # Validate target presence
     if not options.urls:
         if not options.quiet:
             err_console.print(
