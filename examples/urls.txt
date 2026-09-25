@@ -1,0 +1,8 @@
+# Example target URLs for ReconShot testing
+https://example.com
+https://httpbin.org/get
+https://httpbin.org/status/200
+https://httpbin.org/status/403
+https://httpbin.org/status/500
+example.org
+www.wikipedia.org

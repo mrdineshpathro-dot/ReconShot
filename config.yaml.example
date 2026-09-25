@@ -1,0 +1,45 @@
+# ==============================================================================
+# ReconShot — Automated Web Application Screenshot Reconnaissance
+# Example Configuration File
+#
+# Author  : Mr Dinesh Pathro
+# Support : https://buymeacoffee.com/mrdineshpathro
+# Platform: Kali Linux / Debian / Python 3.10+
+# ==============================================================================
+
+# Concurrency & Performance
+workers: 5                 # Number of concurrent screenshot workers (default: 5)
+timeout: 30                # Page navigation & loading timeout in seconds (default: 30)
+delay: 0.0                 # Delay in seconds to wait after DOM load for JS rendering (e.g. 1.5)
+retries: 0                 # Number of retry attempts on temporary connection failures
+
+# Browser & Viewport Configuration
+browser:
+  width: 1920              # Viewport width in pixels (Desktop default: 1920)
+  height: 1080             # Viewport height in pixels (Desktop default: 1080)
+  full_page: false         # Capture full scrollable page (true/false)
+  mobile: false            # Emulate mobile device viewport (390x844 with touch enabled)
+  desktop: true            # Use standard desktop viewport
+  user_agent: null         # Custom User-Agent string (null = default ReconShot UA)
+
+# Output Paths
+output:
+  directory: "./results"   # Base directory for screenshots, metadata, reports, and logs
+
+# Reporting
+report:
+  enabled: true            # Automatically generate standalone dark-themed HTML report
+
+# Network & Proxy
+network:
+  proxy: null              # Proxy address, e.g. "http://127.0.0.1:8080" or "socks5://127.0.0.1:9050"
+  ignore_https_errors: true # Ignore self-signed or invalid SSL certificates (default: true)
+
+# Authenticated Reconnaissance (Authorized scope only)
+auth:
+  cookies_file: null       # Path to JSON cookies file (e.g. "./examples/cookies.json")
+  headers_file: null       # Path to JSON headers file (e.g. "./examples/headers.json")
+
+# Status Code Filtering
+filter:
+  status: null             # Screenshot only selected HTTP status codes (e.g. "200" or "200,301,302,403,500" or "2xx")

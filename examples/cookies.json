@@ -1,0 +1,17 @@
+[
+  {
+    "name": "recon_session_id",
+    "value": "authorized_recon_demo_token_12345",
+    "domain": ".example.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true
+  },
+  {
+    "name": "recon_role",
+    "value": "security_tester",
+    "domain": ".example.com",
+    "path": "/",
+    "secure": true
+  }
+]

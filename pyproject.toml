@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconshot"
+version = "1.0.0"
+description = "Automated Web Application Screenshot Reconnaissance"
+authors = [
+  { name = "Mr Dinesh Pathro" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "playwright>=1.40.0",
+  "rich>=13.0.0",
+  "PyYAML>=6.0.0",
+]
+
+[project.scripts]
+reconshot = "reconshot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reconshot*"]
